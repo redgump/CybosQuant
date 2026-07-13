@@ -1,0 +1,2 @@
+# CYBOS Plus COM API 접근용 (반드시 32비트 Python에 설치)
+pywin32>=306
