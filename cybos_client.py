@@ -36,13 +36,40 @@ class CybosClient:
         self.chart = win32com.client.Dispatch("CpSysDib.StockChart")
 
     # ------------------------------------------------------------------ 연결
+    def is_connected(self):
+        """연결 여부만 bool 로 반환한다 (예외를 던지지 않는다).
+
+        연결이 끊기면 COM 속성 접근 자체가 실패할 수 있으므로 감싸 둔다.
+        """
+        try:
+            return self.cybos.IsConnect == 1
+        except Exception:
+            return False
+
     def ensure_connected(self):
         """CYBOS Plus 연결 상태를 확인한다. 끊겨 있으면 예외."""
-        if self.cybos.IsConnect != 1:
+        if not self.is_connected():
             raise CybosError(
                 "CYBOS Plus 에 연결되어 있지 않습니다. "
                 "CYBOS Plus 를 관리자 권한으로 실행하고 로그인했는지 확인하세요."
             )
+
+    def wait_for_reconnect(self, timeout_sec=600, poll_sec=30, on_wait=None):
+        """연결이 복구될 때까지 대기한다. 복구되면 True, 시간 초과면 False.
+
+        재로그인은 사람이 해야 하므로 여기서는 복구를 '기다리기만' 한다.
+        on_wait(elapsed, timeout) 콜백으로 대기 상황을 알린다.
+        """
+        started = time.time()
+        while True:
+            if self.is_connected():
+                return True
+            elapsed = time.time() - started
+            if elapsed >= timeout_sec:
+                return self.is_connected()
+            if on_wait:
+                on_wait(elapsed, timeout_sec)
+            time.sleep(min(poll_sec, max(timeout_sec - elapsed, 1)))
 
     # -------------------------------------------------------------- 요청제한
     def wait_for_request_slot(self):

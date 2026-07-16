@@ -222,3 +222,6 @@ data/
 
 # 프로브 실행 로그
 probe_out.txt
+
+# 수집 실행 로그
+collect_*.log
