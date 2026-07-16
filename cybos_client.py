@@ -96,8 +96,14 @@ class CybosClient:
         return codes
 
     def _is_common_stock(self, code):
-        """보통주(주권) 여부. ETF/ETN/스팩/우선주 제외 필터."""
-        # GetStockSectionKind: 1 = 주권(일반 주식)
+        """주권 여부. ETF/ETN/리츠 등을 제외하고 스팩도 뺀다.
+
+        우선주는 제외하지 않는다. 우선주도 SectionKind 가 주권(1)이라
+        이 필터를 통과하며, 이는 의도된 동작이다 — 보통주/우선주 스프레드
+        같은 페어 트레이딩에 우선주 시세가 필요하기 때문이다.
+        (우선주만 걸러내려면 종목코드 끝자리가 '0' 인지로 판정하면 된다.)
+        """
+        # GetStockSectionKind: 1 = 주권(일반 주식). 우선주도 여기에 포함된다.
         if self.code_mgr.GetStockSectionKind(code) != 1:
             return False
         # 스팩(기업인수목적회사) 제외
