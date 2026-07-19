@@ -170,7 +170,6 @@ def main():
     consecutive_failures = 0
     aborted = None
     processed = 0  # 실제로 조회를 시도한 종목 수 (ETA 계산용)
-    today_str = datetime.now().strftime("%Y%m%d")
 
     for idx, code in enumerate(codes, start=1):
         name = client.code_to_name(code)
@@ -192,13 +191,22 @@ def main():
                 continue
 
         if last_bar is not None:
-            # 마지막 봉이 있는 날부터 오늘까지 요청한다. 그 날 장중에
-            # 수집이 끊겼더라도 남은 봉이 함께 채워진다.
-            req_type = "period"
-            req_start = str(last_bar[0])
-            req_end = today_str
+            # 기간(period) 요청은 쓰지 않는다. 종료일이 비거래일이면
+            # CYBOS 가 전체를 0봉으로 돌려주기 때문이다(주말·공휴일에
+            # 실행하면 아무것도 못 받는다). 개수 방식은 종료일이 없어
+            # 그 함정이 없다.
+            #
+            # 마지막 봉 이후 흐른 날짜만큼만 요청해 낭비를 줄인다.
+            # 하루치는 정규장 390봉 + 시간외를 합쳐 최대 ~450봉이므로
+            # 하루당 500봉으로 여유를 두고, 최소 1000봉은 받는다.
+            gap_days = (datetime.now() - datetime.strptime(
+                str(last_bar[0]), "%Y%m%d")).days + 1
+            req_type = "count"
+            req_count = max(1000, min(gap_days * 500 + 500, config.COUNT))
+            req_start = req_end = ""
         else:
             req_type = config.REQUEST_TYPE
+            req_count = config.COUNT
             req_start = config.START_DATE
             req_end = config.END_DATE
 
@@ -207,7 +215,7 @@ def main():
                 code,
                 period_min=config.CHART_PERIOD_MIN,
                 request_type=req_type,
-                count=config.COUNT,
+                count=req_count,
                 start_date=req_start,
                 end_date=req_end,
                 adjust_price=config.ADJUST_PRICE,

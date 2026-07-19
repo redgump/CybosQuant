@@ -2,10 +2,13 @@
 """증분 업데이트 리허설.
 
 전체 종목에 이어붙이기를 돌리기 전에, 한 종목의 **사본**을 상대로
-실전과 똑같은 경로(마지막 봉 읽기 -> 기간 요청 -> 중복 필터 -> 이어붙이기)를
+실전과 똑같은 경로(마지막 봉 읽기 -> 개수 요청 -> 중복 필터 -> 이어붙이기)를
 수행해 결과를 검증한다. 원본 CSV 는 건드리지 않는다.
 
-이어붙이기는 되돌리기 번거로우므로 전체 실행 전에 이걸 먼저 통과시킨다.
+새 거래일이 없으면 "이미 최신"으로 끝나 아무것도 검증하지 못하므로,
+사본의 **꼬리를 일부러 잘라내** 장중에 끊긴 상황을 만든 뒤 이어붙이기가
+원본과 바이트 단위로 같게 복구하는지 확인한다. 이게 통과하면
+'덜 채워진 날 메우기'와 '중복 없는 이어붙이기'가 함께 검증된다.
 
     py32 probe_update.py
 """
@@ -39,10 +42,26 @@ def main():
     work = tempfile.mkdtemp(prefix="updprobe_")
     copy = os.path.join(work, os.path.basename(src))
     shutil.copy(src, copy)
-    before_size = os.path.getsize(copy)
 
     # 실전 코드가 사본을 보도록 경로만 갈아끼운다.
     cm.csv_path = lambda code: copy
+
+    # --- 장중에 끊긴 상황을 만든다: 사본의 마지막 CUT 봉을 잘라낸다 ---
+    CUT = 200
+    with open(copy, encoding="utf-8-sig") as f:
+        original_lines = f.read().splitlines()
+    if len(original_lines) < CUT + 2:
+        print("[중단] 표본이 너무 작습니다.")
+        return 1
+    origin_size = os.path.getsize(src)
+    origin_last = cm.read_last_bar(copy)
+
+    with open(copy, "w", newline="", encoding="utf-8-sig") as f:
+        f.write("\r\n".join(original_lines[:-CUT]) + "\r\n")
+    print(f"리허설 준비: 사본에서 마지막 {CUT}봉을 잘라냄")
+    print(f"  원본 마지막 봉 {origin_last} / {origin_size:,} bytes")
+
+    before_size = os.path.getsize(copy)
 
     try:
         client = CybosClient(request_margin=config.REQUEST_MARGIN)
@@ -58,16 +77,17 @@ def main():
         print("[중단] 마지막 봉을 읽지 못했습니다.")
         return 1
 
-    today = datetime.now().strftime("%Y%m%d")
-    print(f"요청 기간: {last[0]} ~ {today}")
+    # 실전(collect_minutes)과 동일하게 개수 방식으로 받는다.
+    # 기간 방식은 종료일이 비거래일이면 0봉을 돌려주므로 쓰지 않는다.
+    gap_days = (datetime.now() - datetime.strptime(str(last[0]), "%Y%m%d")).days + 1
+    req_count = max(1000, min(gap_days * 500 + 500, config.COUNT))
+    print(f"마지막 봉 이후 {gap_days}일 -> 최근 {req_count:,}봉 요청")
 
     rows = client.get_minute_bars(
         CODE,
         period_min=config.CHART_PERIOD_MIN,
-        request_type="period",
-        count=config.COUNT,
-        start_date=str(last[0]),
-        end_date=today,
+        request_type="count",
+        count=req_count,
         adjust_price=config.ADJUST_PRICE,
     )
     print(f"수신 {len(rows):,}봉 (범위 {rows[0][:2] if rows else '-'} ~ "
@@ -80,9 +100,9 @@ def main():
               f"{new_rows[-1][0]} {new_rows[-1][1]:04d}")
 
     if not new_rows:
-        print("\n[결과] 추가할 새 데이터가 없습니다(이미 최신).")
+        print("\n[결과] 잘라낸 구간을 되받지 못했습니다 — 이어붙이기가 동작하지 않음.")
         shutil.rmtree(work, ignore_errors=True)
-        return 0
+        return 1
 
     cm.append_csv(CODE, new_rows)
 
@@ -98,18 +118,26 @@ def main():
         ok = ok and cond
         print(("  PASS " if cond else "  FAIL ") + label)
 
+    after_size = os.path.getsize(copy)
+    with open(copy, encoding="utf-8-sig") as f:
+        restored_lines = f.read().splitlines()
+
     print("\n검증:")
     check(f"필드 수 이상 {bad_fields}개", bad_fields == 0)
     check("시간 오름차순 유지", keys == sorted(keys))
     check(f"중복 봉 없음 ({len(keys)-len(set(keys))}개)", len(keys) == len(set(keys)))
-    check(f"행 수 = 기존+신규 ({len(keys)})",
-          len(keys) == len(body))
-    check(f"마지막 봉 갱신 {cm.read_last_bar(copy)}",
-          cm.read_last_bar(copy) == (new_rows[-1][0], new_rows[-1][1]))
-    check(f"원본 미변경 ({os.path.getsize(src)} bytes)",
-          os.path.getsize(src) == before_size)
+    check(f"잘라낸 {CUT}봉 복구 ({len(new_rows)}봉 추가)", len(new_rows) == CUT)
+    check(f"행 수 원상복구 ({len(restored_lines)} = {len(original_lines)})",
+          len(restored_lines) == len(original_lines))
+    check(f"내용이 원본과 완전 일치", restored_lines == original_lines)
+    check(f"파일 크기 원상복구 ({after_size:,} = {origin_size:,})",
+          after_size == origin_size)
+    check(f"마지막 봉 복원 {cm.read_last_bar(copy)} = {origin_last}",
+          cm.read_last_bar(copy) == origin_last)
+    check("원본 파일 미변경", os.path.getsize(src) == origin_size)
 
-    print(f"\n사본 크기: {before_size:,} -> {os.path.getsize(copy):,} bytes")
+    print(f"\n사본 크기: {before_size:,} -> {after_size:,} bytes "
+          f"(원본 {origin_size:,})")
     shutil.rmtree(work, ignore_errors=True)
     print("\n[결과] " + ("리허설 통과 — 전체 실행 가능" if ok else "리허설 실패 — 전체 실행 중단"))
     return 0 if ok else 1

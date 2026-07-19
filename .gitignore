@@ -228,3 +228,6 @@ collect_*.log
 
 # 증분 업데이트 로그
 update_*.log
+
+# 진단 로그
+diag.log
