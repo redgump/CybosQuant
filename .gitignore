@@ -225,3 +225,6 @@ probe_out.txt
 
 # 수집 실행 로그
 collect_*.log
+
+# 증분 업데이트 로그
+update_*.log

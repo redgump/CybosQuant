@@ -30,6 +30,9 @@ def csv_path(code):
     return os.path.join(config.OUTPUT_DIR, fname)
 
 
+CSV_HEADER = ["date", "time", "open", "high", "low", "close", "volume"]
+
+
 def save_csv(code, rows):
     """분봉 행들을 종목별 CSV 로 저장한다 (시간 오름차순).
 
@@ -40,9 +43,74 @@ def save_csv(code, rows):
     tmp = path + ".tmp"
     with open(tmp, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.writer(f)
-        writer.writerow(["date", "time", "open", "high", "low", "close", "volume"])
+        writer.writerow(CSV_HEADER)
         writer.writerows(rows)
     os.replace(tmp, path)
+
+
+def read_last_bar(path, tail_bytes=8192):
+    """CSV 의 마지막 봉 (date, time) 을 읽어 반환한다. 없으면 None.
+
+    파일이 수 MB 라 전체를 읽지 않고 끝부분만 확인한다.
+    이어붙이기 도중 중단되어 마지막 줄이 잘렸을 수 있으므로, 깨진
+    꼬리 줄은 잘라내고(파일을 직접 고친다) 그 앞의 온전한 줄을 쓴다.
+    """
+    size = os.path.getsize(path)
+    if size == 0:
+        return None
+
+    with open(path, "rb") as f:
+        start = max(0, size - tail_bytes)
+        f.seek(start)
+        chunk = f.read()
+
+    # 첫 줄은 잘렸을 수 있으니 버린다(파일 처음부터 읽은 경우는 제외).
+    lines = chunk.split(b"\n")
+    if start > 0:
+        lines = lines[1:]
+
+    # 뒤에서부터 온전한 줄을 찾는다. split(b"\n") 결과에서 마지막 원소만
+    # 뒤따르는 개행이 없고(파일이 개행으로 끝나면 그 원소는 빈 문자열),
+    # 나머지는 개행 1바이트를 동반한다. 이걸 구분하지 않으면 truncate 위치가
+    # 1바이트 어긋나 파일 끝 개행이 사라지고, 다음 이어붙이기가 마지막 줄에
+    # 달라붙어 데이터를 망가뜨린다.
+    offset = size
+    for i, raw in enumerate(reversed(lines)):
+        nl = 0 if i == 0 else 1
+        offset -= len(raw) + nl        # 이 줄이 시작하는 위치
+        line = raw.strip()
+        if not line:
+            continue
+        parts = line.decode("utf-8", errors="replace").split(",")
+        if len(parts) == len(CSV_HEADER):
+            try:
+                date, tm = int(parts[0]), int(parts[1])
+            except ValueError:
+                continue               # 헤더 줄
+            if nl == 0:
+                # 파일이 개행 없이 끝났다 -> 뒤의 쓰레기를 버리고 개행 보충
+                with open(path, "r+b") as f:
+                    f.seek(offset + len(raw))
+                    f.truncate()
+                    f.write(b"\r\n")
+            elif offset + len(raw) + nl < size:
+                # 마지막 온전한 줄 뒤에 잘린 꼬리가 남아 있다 -> 잘라낸다
+                with open(path, "r+b") as f:
+                    f.truncate(offset + len(raw) + nl)
+            return date, tm
+    return None
+
+
+def append_csv(code, rows):
+    """기존 CSV 뒤에 새 봉들을 이어붙인다 (헤더 없이).
+
+    한 번의 write 로 내보내 중단 시 잘린 줄이 남을 창을 줄인다.
+    그래도 잘리면 다음 실행의 read_last_bar() 가 정리한다.
+    """
+    path = csv_path(code)
+    buf = "".join(",".join(str(v) for v in r) + "\r\n" for r in rows)
+    with open(path, "a", newline="", encoding="utf-8-sig") as f:
+        f.write(buf)
 
 
 # SetThreadExecutionState 플래그 (WinBase.h)
@@ -98,27 +166,50 @@ def main():
 
     started = time.time()
     ok = skipped = failed = 0
+    updated = uptodate = 0
     consecutive_failures = 0
     aborted = None
     processed = 0  # 실제로 조회를 시도한 종목 수 (ETA 계산용)
+    today_str = datetime.now().strftime("%Y%m%d")
 
     for idx, code in enumerate(codes, start=1):
         name = client.code_to_name(code)
         prefix = f"[{idx}/{total}] {code} {name}"
 
-        if config.SKIP_EXISTING and os.path.exists(csv_path(code)):
-            skipped += 1
-            print(f"{prefix} -> 건너뜀(기존 파일)")
-            continue
+        exists = os.path.exists(csv_path(code))
+        last_bar = None
+
+        if exists:
+            if config.INCREMENTAL_UPDATE:
+                # 마지막 봉 이후만 받아 이어붙인다.
+                last_bar = read_last_bar(csv_path(code))
+                if last_bar is None:
+                    # 파일이 비었거나 헤더뿐 -> 전체 수집으로 되돌린다.
+                    exists = False
+            elif config.SKIP_EXISTING:
+                skipped += 1
+                print(f"{prefix} -> 건너뜀(기존 파일)")
+                continue
+
+        if last_bar is not None:
+            # 마지막 봉이 있는 날부터 오늘까지 요청한다. 그 날 장중에
+            # 수집이 끊겼더라도 남은 봉이 함께 채워진다.
+            req_type = "period"
+            req_start = str(last_bar[0])
+            req_end = today_str
+        else:
+            req_type = config.REQUEST_TYPE
+            req_start = config.START_DATE
+            req_end = config.END_DATE
 
         try:
             rows = client.get_minute_bars(
                 code,
                 period_min=config.CHART_PERIOD_MIN,
-                request_type=config.REQUEST_TYPE,
+                request_type=req_type,
                 count=config.COUNT,
-                start_date=config.START_DATE,
-                end_date=config.END_DATE,
+                start_date=req_start,
+                end_date=req_end,
                 adjust_price=config.ADJUST_PRICE,
             )
         except CybosError as exc:
@@ -161,18 +252,36 @@ def main():
             print(f"{prefix} -> 데이터 없음")
             continue
 
-        save_csv(code, rows)
-        ok += 1
-        print(f"{prefix} -> {len(rows):,}건 저장")
+        if last_bar is not None:
+            # 이미 가진 마지막 봉보다 뒤엣것만 남긴다(같은 날 중복 방지).
+            new_rows = [r for r in rows if (r[0], r[1]) > last_bar]
+            if not new_rows:
+                uptodate += 1
+                print(f"{prefix} -> 최신 상태({last_bar[0]} {last_bar[1]:04d})")
+                continue
+            append_csv(code, new_rows)
+            updated += 1
+            print(f"{prefix} -> {len(new_rows):,}건 추가 "
+                  f"(~{new_rows[-1][0]} {new_rows[-1][1]:04d})")
+        else:
+            save_csv(code, rows)
+            ok += 1
+            print(f"{prefix} -> {len(rows):,}건 저장")
 
         if processed % 50 == 0:
-            print(f"  --- 진행 {idx}/{total} | 저장 {ok} 실패 {failed} | "
+            print(f"  --- 진행 {idx}/{total} | 추가 {updated} 최신 {uptodate} "
+                  f"신규저장 {ok} 실패 {failed} | "
                   f"{fmt_eta(idx, total, time.time() - started)}")
 
     elapsed = time.time() - started
     print("\n===== 완료 =====" if not aborted else f"\n===== 중단: {aborted} =====")
-    print(f"저장 {ok} / 건너뜀 {skipped} / 실패 {failed}  "
-          f"(총 {total}, 소요 {elapsed/3600:.2f}시간)")
+    if config.INCREMENTAL_UPDATE:
+        print(f"추가 {updated} / 이미최신 {uptodate} / 신규저장 {ok} / "
+              f"건너뜀 {skipped} / 실패 {failed}  "
+              f"(총 {total}, 소요 {elapsed/3600:.2f}시간)")
+    else:
+        print(f"저장 {ok} / 건너뜀 {skipped} / 실패 {failed}  "
+              f"(총 {total}, 소요 {elapsed/3600:.2f}시간)")
     if aborted:
         print("이미 저장된 CSV 는 유지됩니다. "
               "원인을 해결하고 다시 실행하면 이어서 진행합니다(SKIP_EXISTING=True).")

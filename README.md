@@ -106,13 +106,14 @@ py32 collect_minutes.py
 | `COUNT` | count 방식일 때 종목당 최대 봉 개수 |
 | `START_DATE`/`END_DATE` | period 방식 기간 (YYYYMMDD) |
 | `MARKETS` | `[1, 2]` = 코스피+코스닥 |
-| `COMMON_STOCK_ONLY` | 보통주만 (ETF/스팩 제외) |
+| `COMMON_STOCK_ONLY` | 주권만 (ETF/ETN/스팩 제외, **우선주는 포함**) |
 | `LIMIT_STOCKS` | 테스트용, 앞 N개만 (`0`=전체) |
 | `SKIP_EXISTING` | 이미 저장된 종목 건너뛰기 (재개용) |
+| `INCREMENTAL_UPDATE` | 기존 CSV 에 새 봉만 이어붙이기 (매일 실행용) |
 
 ### 저장 결과
 
-종목별로 `data/{종목코드}_{주기}m.csv` 로 저장된다.
+종목별로 `data/1mdata/{종목코드}_{주기}m.csv` 로 저장된다.
 
 ```
 date,time,open,high,low,close,volume
@@ -124,10 +125,31 @@ date,time,open,high,low,close,volume
 - `date` = YYYYMMDD, `time` = HHMM
 - 데이터는 시간 오름차순으로 저장
 
+## 매일 증분 업데이트
+
+`INCREMENTAL_UPDATE = True` 면 기존 CSV 의 **마지막 봉 이후 데이터만** 받아
+같은 파일에 이어붙인다. 매일 돌리면 파일 하나가 계속 자라난다.
+
+```powershell
+# 리허설(1종목 사본 검증) 후 통과하면 전체 실행. UAC 승인 1회.
+powershell -ExecutionPolicy Bypass -File run_daily_update.ps1
+```
+
+- 마지막 봉이 있는 **날짜부터** 다시 요청하므로, 장중에 끊겨 그 날이
+  덜 채워졌더라도 나머지가 함께 메워진다.
+- 파일이 없는 종목(신규 상장 등)은 평소대로 2년치 전체를 받는다.
+- 장 마감(15:30) 이후 실행할 것. 장중에 돌리면 그 시점까지의 봉만 들어간다.
+
+> ⚠️ **액면분할·병합 주의.** 이어붙이기는 과거 가격을 다시 계산하지 않는다.
+> 분할이 일어난 종목은 과거 구간이 옛 기준가로 남아 신규 구간과 어긋난다.
+> 해당 종목의 CSV 를 지우고 다시 실행하면 전체를 새 기준으로 받는다.
+
 ## 중단 / 재개
 
 - 실행 중 `Ctrl+C` 로 중단해도 이미 저장된 CSV 는 유지된다.
 - `SKIP_EXISTING = True` 상태로 다시 실행하면 **저장 안 된 종목부터 이어서** 진행한다.
+- 이어붙이기 도중 중단되어 마지막 줄이 잘려도, 다음 실행이 그 줄을
+  잘라내고 이어간다.
 
 ## 요청 제한
 
