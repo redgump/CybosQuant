@@ -235,3 +235,6 @@ diag.log
 # 세션 유지 기록
 keepalive.csv
 keepalive.log
+
+# 리허설 로그
+probe_update.log

@@ -113,7 +113,7 @@ py32 collect_minutes.py
 
 ### 저장 결과
 
-종목별로 `data/1mdata/{종목코드}_{주기}m.csv` 로 저장된다.
+종목별로 `data/intraday/{종목코드}_{주기}m.csv` 로 저장된다.
 
 ```
 date,time,open,high,low,close,volume
