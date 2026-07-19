@@ -231,3 +231,7 @@ update_*.log
 
 # 진단 로그
 diag.log
+
+# 세션 유지 기록
+keepalive.csv
+keepalive.log
